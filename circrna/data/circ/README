@@ -1,6 +1,6 @@
 We have a set of ~10,000 circRNAs and we'd like to determine whether any of these circRNAs are translated and whether their protein products are presented on MHC class I molecules. Additionally, we're interested in seeing if circRNAs can be translated in the reverse (3'->5') direction. 
 
-So for each circRNA, I predicted all possible open reading frames that span the back-splice junction (BSJ) in both the forward (canonical 5'→3') and backward (reversed 3'→5') directions. I then generated all 8–11mer peptide windows centered on the junction. 
+So for each circRNA, I predicted all possible open reading frames that span the back-splice junction (BSJ) in both the forward (canonical 5'->3') and backward (reversed 3'->5') directions. I then generated all 8–11mer peptide windows centered on the junction. 
 
 If you have raw MS spectra, I've attached the full-length ORF protein FASTA files to re-search the raw spectra against an expanded database:
 - forward_bsj_spanning_proteins.fasta

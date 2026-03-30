@@ -15,6 +15,7 @@ import re
 import io
 import json
 import base64
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -90,6 +91,9 @@ def venn2_img(set_a, set_b, label_a="A", label_b="B", title="") -> str:
     ax.text(0.72, 0.01, label_b, ha="center", va="center", fontsize=9,
             color="#DD8452")
 
+    if title:
+        ax.set_title(title, fontsize=10, fontweight="bold", color="#444", pad=6)
+
     plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
     buf = io.BytesIO()
@@ -98,10 +102,7 @@ def venn2_img(set_a, set_b, label_a="A", label_b="B", title="") -> str:
     b64 = base64.b64encode(buf.read()).decode()
     plt.close(fig)
 
-    title_html = (f'<p style="text-align:center;font-size:.88rem;font-weight:600;'
-                  f'color:#444;margin:0 0 6px;">{title}</p>') if title else ""
     return (f'<div style="display:inline-block;text-align:center;">'
-            f'{title_html}'
             f'<img src="data:image/png;base64,{b64}" '
             f'style="max-width:440px;width:100%;height:auto;" alt="Venn diagram">'
             f'</div>')
@@ -1133,9 +1134,9 @@ def enrich_bar(source_key, title, color, top_n=20):
     )
     return fig
 
-fig13_gobp  = enrich_bar("GO:BP", "GO Biological Process (top 20)",  "#4C72B0")
-fig13_kegg  = enrich_bar("KEGG",  "KEGG Pathways (top 20)",           "#DD8452")
-fig13_reac  = enrich_bar("REAC",  "Reactome Pathways (top 20)",       "#2ca02c")
+fig13_gobp  = enrich_bar("GO:BP", "GO Biological Process (Top 20)",  "#4C72B0")
+fig13_kegg  = enrich_bar("KEGG",  "KEGG Pathways (Top 20)",           "#DD8452")
+fig13_reac  = enrich_bar("REAC",  "Reactome Pathways (Top 20)",       "#2ca02c")
 
 fig13_gobp_html = fig13_gobp.to_html(full_html=False, include_plotlyjs=False)
 fig13_kegg_html = fig13_kegg.to_html(full_html=False, include_plotlyjs=False)
@@ -1145,6 +1146,12 @@ fig13_reac_html = fig13_reac.to_html(full_html=False, include_plotlyjs=False)
 # PER-SAMPLE FIGURES
 # ═══════════════════════════════════════════════════════════════════════════════
 print("Building per-sample figures…")
+
+# Pre-compute peptide sets for all samples (used in overlap chart)
+sample_pep_sets = {}
+for _s, _mc in zip(samples, match_cols):
+    _mask = df[_mc] != "unmatched"
+    sample_pep_sets[_s] = set(df.loc[_mask, "Peptide Sequence"].dropna())
 
 sample_figs = {}
 for i, (s, mc, sc) in enumerate(zip(samples, match_cols, spectral_cols)):
@@ -1218,6 +1225,148 @@ for i, (s, mc, sc) in enumerate(zip(samples, match_cols, spectral_cols)):
         title=f"MHC-I Peptides vs IEDB \u2014 {s}",
     )
 
+    # ── Sequence logo + AA position frequency heatmap (9-mers, non-contam) ──
+    s_mers9 = detected.loc[
+        (detected["Peptide Length"] == 9) & (~detected["_is_contam"]),
+        "Peptide Sequence"
+    ].dropna().tolist()
+
+    if s_mers9:
+        s_pos_aa = np.zeros((9, 20))
+        for pep in s_mers9:
+            for pos, aa in enumerate(pep):
+                if aa in AAS:
+                    s_pos_aa[pos, AAS.index(aa)] += 1
+        s_pos_freq = s_pos_aa / s_pos_aa.sum(axis=1, keepdims=True)
+
+        fig_s_heatmap = go.Figure(go.Heatmap(
+            z=s_pos_freq.T,
+            x=[f"P{i+1}" for i in range(9)],
+            y=AAS,
+            colorscale="RdBu_r",
+            zmid=1 / 20,
+            colorbar=dict(title="Frequency"),
+            text=np.round(s_pos_freq.T, 3),
+            texttemplate="%{text}",
+            textfont=dict(size=8),
+        ))
+        fig_s_heatmap.update_layout(
+            title=f"AA Position Frequency \u2014 9-mers (n={len(s_mers9):,}) \u2014 {s}",
+            xaxis_title="Position", yaxis_title="Amino Acid",
+            template="plotly_white", height=550,
+        )
+        s_heatmap_html = fig_s_heatmap.to_html(full_html=False, include_plotlyjs=False,
+                                                config={"responsive": True})
+
+        s_logo_df = pd.DataFrame(s_pos_freq, columns=AAS, index=list(range(9)))
+        s_info_df = logomaker.transform_matrix(s_logo_df, from_type="probability",
+                                               to_type="information")
+        fig_s_logo, s_axes = plt.subplots(1, 2, figsize=(16, 3.5))
+        fig_s_logo.patch.set_facecolor("white")
+        for ax, matrix, t, ylabel in [
+            (s_axes[0], s_logo_df, f"Frequency Logo \u2014 9-mers (n={len(s_mers9):,})", "Frequency"),
+            (s_axes[1], s_info_df, f"Information Content Logo \u2014 9-mers (n={len(s_mers9):,})", "Bits"),
+        ]:
+            logomaker.Logo(matrix, ax=ax, color_scheme="chemistry")
+            ax.set_title(t, fontsize=11)
+            ax.set_xlabel("Position", fontsize=10)
+            ax.set_ylabel(ylabel, fontsize=10)
+            for pos in [1, 8]:
+                ax.axvspan(pos - 0.5, pos + 0.5, color="gold", alpha=0.18, zorder=0)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+        plt.tight_layout(pad=2.0)
+        _sbuf = io.BytesIO()
+        fig_s_logo.savefig(_sbuf, format="png", bbox_inches="tight", dpi=150)
+        _sbuf.seek(0)
+        s_logo_b64 = base64.b64encode(_sbuf.read()).decode()
+        plt.close(fig_s_logo)
+        s_logo_html = (
+            f'<img src="data:image/png;base64,{s_logo_b64}" '
+            f'style="max-width:100%;height:auto;" alt="Sequence Logo \u2014 {s}">'
+        )
+    else:
+        s_heatmap_html = "<p class='note'>No 9-mer peptides detected.</p>"
+        s_logo_html    = "<p class='note'>No 9-mer peptides detected.</p>"
+
+    # ── Spectral count histogram ──────────────────────────────────────────────
+    sc_vals = detected[sc]
+    sc_vals = sc_vals[sc_vals > 0]
+    fig_s_sc = go.Figure(go.Histogram(
+        x=sc_vals, nbinsx=40,
+        marker_color=s_color, opacity=0.85,
+    ))
+    fig_s_sc.update_layout(
+        title=f"Spectral Count Distribution \u2014 {s}",
+        xaxis_title="Spectral Count", yaxis_title="# Peptides",
+        xaxis_type="log", template="plotly_white", height=340,
+    )
+    s_sc_html = fig_s_sc.to_html(full_html=False, include_plotlyjs=False,
+                                  config={"responsive": True})
+
+    # ── Log2 intensity histogram ──────────────────────────────────────────────
+    int_col = f"{s} Intensity"
+    if int_col in df.columns:
+        int_raw = df.loc[detected_mask, int_col]
+        int_vals = np.log2(int_raw[int_raw > 0])
+        fig_s_int = go.Figure(go.Histogram(
+            x=int_vals, nbinsx=40,
+            marker_color=s_color, opacity=0.85,
+        ))
+        fig_s_int.update_layout(
+            title=f"Log\u2082 Intensity Distribution \u2014 {s}",
+            xaxis_title="Log\u2082 Intensity", yaxis_title="# Peptides",
+            template="plotly_white", height=340,
+        )
+        s_int_html = fig_s_int.to_html(full_html=False, include_plotlyjs=False,
+                                        config={"responsive": True})
+    else:
+        s_int_html = "<p class='note'>Intensity data not available for this sample.</p>"
+
+    # ── Peptide overlap with other samples ────────────────────────────────────
+    s_peps = sample_pep_sets[s]
+    overlap_rows = sorted(
+        [{"sample": s2, "shared": len(s_peps & sample_pep_sets[s2])}
+         for s2 in samples if s2 != s],
+        key=lambda r: r["shared"]
+    )
+    overlap_df = pd.DataFrame(overlap_rows)
+    fig_s_overlap = go.Figure(go.Bar(
+        x=overlap_df["shared"], y=overlap_df["sample"],
+        orientation="h",
+        marker_color=s_color,
+        text=overlap_df["shared"].map("{:,}".format),
+        textposition="outside",
+    ))
+    fig_s_overlap.update_layout(
+        title=f"Peptide Overlap with Other Samples \u2014 {s}",
+        xaxis_title="Shared Peptides", yaxis_title="Sample",
+        template="plotly_white",
+        height=max(300, 80 + 40 * (len(samples) - 1)),
+        margin=dict(r=80),
+    )
+    s_overlap_html = fig_s_overlap.to_html(full_html=False, include_plotlyjs=False,
+                                            config={"responsive": True})
+
+    # ── Top 15 proteins by peptide count ─────────────────────────────────────
+    top_prots = (
+        detected.loc[~detected["_is_contam"], "Protein"]
+        .value_counts().head(15).sort_values(ascending=True)
+    )
+    fig_s_prot = go.Figure(go.Bar(
+        x=top_prots.values, y=top_prots.index.tolist(),
+        orientation="h",
+        marker_color=s_color,
+        text=top_prots.values, textposition="outside",
+    ))
+    fig_s_prot.update_layout(
+        title=f"Top 15 Proteins by Peptide Count \u2014 {s}",
+        xaxis_title="Peptide Count", yaxis_title="Protein",
+        template="plotly_white", height=500, margin=dict(r=80),
+    )
+    s_prot_html = fig_s_prot.to_html(full_html=False, include_plotlyjs=False,
+                                      config={"responsive": True})
+
     row = summary_df[summary_df["Sample"] == s].iloc[0]
     sample_figs[s] = dict(
         stats=row,
@@ -1228,6 +1377,12 @@ for i, (s, mc, sc) in enumerate(zip(samples, match_cols, spectral_cols)):
         chg_html=fig_s_chg.to_html(full_html=False, include_plotlyjs=False,
                                    config={"responsive": True}),
         venn_html=s_venn_html,
+        logo_html=s_logo_html,
+        heatmap_html=s_heatmap_html,
+        sc_html=s_sc_html,
+        int_html=s_int_html,
+        overlap_html=s_overlap_html,
+        prot_html=s_prot_html,
     )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1264,6 +1419,30 @@ def build_sample_page(s, figs):
     <div style="min-width:0;overflow:hidden;">{figs['src_html']}</div>
     <div style="min-width:0;overflow:hidden;">{figs['chg_html']}</div>
   </div>
+</div>
+<div class="section">
+  <h2>{s} \u2014 Spectral Count &amp; Intensity</h2>
+  <p class="note">Distribution of spectral counts and log\u2082 intensities for detected peptides in this sample.</p>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;">
+    <div style="min-width:0;overflow:hidden;">{figs['sc_html']}</div>
+    <div style="min-width:0;overflow:hidden;">{figs['int_html']}</div>
+  </div>
+</div>
+<div class="section">
+  <h2>{s} \u2014 Binding Motif (9-mers)</h2>
+  <p class="note">Sequence logo and position-specific amino acid frequency for 9-mer MHC-I peptides (non-contaminant). Gold highlights mark P2 and P9 anchor positions.</p>
+  <div style="margin-top:16px;">{figs['logo_html']}</div>
+  <div class="plot-grid" style="margin-top:24px;">{figs['heatmap_html']}</div>
+</div>
+<div class="section">
+  <h2>{s} \u2014 Peptide Overlap with Other Samples</h2>
+  <p class="note">Number of peptides shared between this sample and each other sample (all detected, non-filtered).</p>
+  <div class="plot-grid">{figs['overlap_html']}</div>
+</div>
+<div class="section">
+  <h2>{s} \u2014 Top Proteins</h2>
+  <p class="note">Top 15 source proteins by number of detected peptides (contaminants excluded).</p>
+  <div class="plot-grid">{figs['prot_html']}</div>
 </div>
 <div class="section">
   <h2>{s} \u2014 IEDB Cross-reference (MHC-I)</h2>
@@ -1337,6 +1516,9 @@ CSS = """
   .note { font-size: .82rem; color: #666; margin-top: 10px; }
   .desc { font-size: .9rem; color: #444; line-height: 1.65; margin: 10px 0 18px; }
   .plot-grid { display: grid; grid-template-columns: 1fr; gap: 24px; margin-top: 16px; }
+  .site-footer { background: #f7f8fc; border-top: 1px solid #dde1f0; padding: 18px 40px;
+                 font-size: .8rem; color: #888; display: flex; justify-content: space-between;
+                 align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 40px; }
   /* ── glossary ── */
   .glossary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 20px; }
   .glossary-card { background: #f7f8fc; border-left: 3px solid #4C72B0;
@@ -1945,6 +2127,11 @@ html = f"""<!DOCTYPE html>
 </div><!-- /content-area -->
 </div><!-- /app-body -->
 
+<footer class="site-footer">
+  <span>Developed by the He Lab</span>
+  <span>Last updated: {datetime.now().strftime("%B %d, %Y")}</span>
+</footer>
+
 <script>
 function switchTab(tabId) {{
   document.querySelectorAll('.tab-content').forEach(function(el) {{
@@ -1955,6 +2142,7 @@ function switchTab(tabId) {{
   }});
   document.getElementById('tab-' + tabId).classList.remove('hidden');
   document.querySelector('[data-tab="' + tabId + '"]').classList.add('active');
+  window.dispatchEvent(new Event('resize'));
 }}
 </script>
 
